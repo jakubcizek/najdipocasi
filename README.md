@@ -138,6 +138,8 @@ python najdi.py --co teplota --kde 0-20000-0-11723 --kolik "<0"
 | `--kolik` | `-k` | Práh hodnoty s operátorem, např. `">=35"`, `"<0"`, `">=1"`. U teploty **povinné**, u deště volitelné (výchozí: jakýkoli úhrn > 0). |
 | `--hloubka` | `-d` | Kolik posledních epizod vypsat (výchozí 1). |
 | `--maximalni_prodleva` | `-m` | Kolik minut přestávky se ještě počítá do jedné epizody (výchozí 0 = jakékoli přerušení epizodu ukončí). |
+| `--od` | | Hledat jen od tohoto data (např. `13.06.2026`). |
+| `--do` | | Hledat jen do tohoto data (např. `16.06.2026`). |
 
 Nápovědu zobrazíš kdykoli:
 
@@ -158,6 +160,20 @@ Epizoda je **souvislé období**, kdy podmínka platila. Měření chodí po 10 
 Ve výchozím stavu (`--maximalni_prodleva 0`) jakýkoli výpadek epizodu ukončí.
 Když povolíš třeba `--maximalni_prodleva 30`, krátké přestávky do 30 minut se
 berou jako součást téže epizody (dva blízké dešťíky se spojí v jeden).
+
+### Omezení rozsahu pomocí `--od` a `--do`
+
+Když tě zajímá jen konkrétní období, ohranič ho. Program pak nestahuje a
+neprochází celý archiv, takže je rychlejší:
+
+```
+python najdi.py --co dest --kde 0-203-0-11721 --od 13.06.2026 --do 16.06.2026 --hloubka 10
+```
+
+Volby jdou použít i samostatně — `--do` bez `--od` hledá nejnovější epizodu
+do daného data, `--od` bez `--do` zase od daného data po současnost. Datum lze
+psát jako `13.06.2026` i `2026-06-13`, hranice se berou v místním čase (`--od`
+od půlnoci, `--do` do konce dne).
 
 ---
 

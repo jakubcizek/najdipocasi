@@ -247,6 +247,17 @@ def parse_kolik(s):
     return OPERATORY[op], op, prah
 
 
+def parse_datum(s):
+    """Z řetězce '13.06.2026' nebo '2026-06-13' vrátí date."""
+    for fmt in ("%d.%m.%Y", "%Y-%m-%d", "%d.%m.%y"):
+        try:
+            return dt.datetime.strptime(s.strip(), fmt).date()
+        except ValueError:
+            pass
+    raise ValueError(f"nesrozumitelné datum „{s}“ "
+                     f"(zkus 13.06.2026 nebo 2026-06-13)")
+
+
 def stahni(url):
     """Vrátí naparsovaný JSON, nebo None pokud soubor neexistuje (404)."""
     r = SESSION.get(url, timeout=30)
@@ -279,45 +290,71 @@ def soubor_mesice(wsi, rok, mesic):
     return f"{BASE}{mesic:02d}/10m-{wsi}-{rok:04d}{mesic:02d}.json"
 
 
-def zaznamy_zpet(wsi, element):
+def zaznamy_zpet(wsi, element, od_dt=None, do_dt=None):
     """Líně generuje záznamy (datetime, hodnota) od nejnovějších po nejstarší.
     Soubory stahuje až ve chvíli, kdy jsou potřeba, a plynule přechází z denních
-    souborů aktuálního měsíce na měsíční archiv."""
+    souborů aktuálního měsíce na měsíční archiv.
+
+    Volitelné meze od_dt/do_dt (aware datetime) omezí jak rozsah vydaných
+    záznamů, tak rozsah stahovaných souborů – díky tomu se neprochází celý
+    archiv."""
+    def v_rozsahu(cas):
+        return ((od_dt is None or cas >= od_dt)
+                and (do_dt is None or cas <= do_dt))
+
+    def vydej(payload):
+        for cas, val in hodnoty_z_payloadu(payload, element):
+            if v_rozsahu(cas):
+                yield cas, val
+
     dnes = dt.datetime.now(dt.timezone.utc).date()
+    aktualni_prvni = dnes.replace(day=1)
+
+    # Horní/dolní mez pro výběr souborů (UTC datum).
+    horni = dnes if do_dt is None else min(dnes, do_dt.astimezone(dt.timezone.utc).date())
+    dolni = None if od_dt is None else od_dt.astimezone(dt.timezone.utc).date()
 
     # 1) Aktuální měsíc po dnech (archiv ho ještě nemá jako měsíční soubor).
-    prvni = dnes.replace(day=1)
-    den = dnes
-    while den >= prvni:
-        _oznam(f"Stahuji data za {den:%d.%m.%Y}")
-        payload = stahni(soubor_dne(wsi, den))
-        if payload:
-            yield from hodnoty_z_payloadu(payload, element)
-        den -= dt.timedelta(days=1)
+    if horni >= aktualni_prvni:
+        den = horni
+        while den >= aktualni_prvni and (dolni is None or den >= dolni):
+            _oznam(f"Stahuji data za {den:%d.%m.%Y}")
+            payload = stahni(soubor_dne(wsi, den))
+            if payload:
+                yield from vydej(payload)
+            den -= dt.timedelta(days=1)
+        rok, mesic = aktualni_prvni.year, aktualni_prvni.month - 1
+    else:
+        # Okno celé v minulosti – začínáme rovnou v měsíci horní meze.
+        rok, mesic = horni.year, horni.month
+
+    if mesic == 0:
+        mesic, rok = 12, rok - 1
 
     # 2) Starší měsíce po jednom souboru, dokud archiv nějaký vrací.
-    rok, mesic = prvni.year, prvni.month
     for _ in range(MAX_MESICU_ZPET):
-        mesic -= 1
-        if mesic == 0:
-            mesic, rok = 12, rok - 1
+        if dolni is not None and (rok, mesic) < (dolni.year, dolni.month):
+            break  # celý měsíc je pod dolní mezí
         _oznam(f"Stahuji data za {rok}-{mesic:02d}")
         payload = stahni(soubor_mesice(wsi, rok, mesic))
         if payload is None:
             break  # archiv končí – starší data nemáme
-        yield from hodnoty_z_payloadu(payload, element)
+        yield from vydej(payload)
+        mesic -= 1
+        if mesic == 0:
+            mesic, rok = 12, rok - 1
 
 
-def najdi_epizody(wsi, element, podminka, hloubka, limit):
+def najdi_epizody(wsi, element, podminka, hloubka, limit, od_dt=None, do_dt=None):
     """Najde až `hloubka` po sobě jdoucích epizod (směrem do minulosti), kdy
     `podminka(hodnota)` platí. `limit` je největší přípustný časový rozestup
-    mezi sousedními výskyty téže epizody.
+    mezi sousedními výskyty téže epizody. Volitelné od_dt/do_dt omezí rozsah.
     Vrací seznam (zacatek, konec, hodnoty) v UTC od nejnovější po nejstarší."""
     epizody = []
     konec = zacatek = None
     hodnoty = []
 
-    for cas, val in zaznamy_zpet(wsi, element):
+    for cas, val in zaznamy_zpet(wsi, element, od_dt, do_dt):
         jev = podminka(val)
         if konec is None:
             # Hledáme konec další epizody = poslední výskyt splňující podmínku.
@@ -394,6 +431,11 @@ def main():
                         help="max. přestávka v minutách, kterou epizoda ještě "
                              "snese (výchozí 0 = jakékoliv přerušení epizodu "
                              "ukončí)")
+    parser.add_argument("--od",
+                        help="hledat jen od tohoto data (např. 13.06.2026); "
+                             "omezí prohledávaný rozsah")
+    parser.add_argument("--do",
+                        help="hledat jen do tohoto data (např. 16.06.2026)")
     args = parser.parse_args()
 
     # Vyhledávání stanic má jinou logiku – --kde je hledaný název/kód.
@@ -423,6 +465,20 @@ def main():
     else:
         cmp, op, prah = jev["vychozi"]
 
+    # Volitelné meze rozsahu: --od od půlnoci, --do do konce dne (místní čas).
+    od_dt = do_dt = None
+    try:
+        if args.od:
+            od_dt = dt.datetime.combine(parse_datum(args.od),
+                                        dt.time.min).astimezone()
+        if args.do:
+            do_dt = dt.datetime.combine(parse_datum(args.do),
+                                        dt.time.max).astimezone()
+    except ValueError as e:
+        parser.error(str(e))
+    if od_dt and do_dt and od_dt > do_dt:
+        parser.error("--od je pozdější než --do")
+
     podminka = lambda v: cmp(v, prah)
     limit = KROK + dt.timedelta(minutes=args.maximalni_prodleva)
     popis = f"{jev['popis']} {op} {prah:g} {jev['jednotka']}"
@@ -431,7 +487,7 @@ def main():
     PRUBEH.start("Stahuji data")
     try:
         epizody = najdi_epizody(args.kde, jev["element"], podminka,
-                                args.hloubka, limit)
+                                args.hloubka, limit, od_dt, do_dt)
     finally:
         PRUBEH.hotovo()
 
