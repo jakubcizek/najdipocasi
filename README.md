@@ -253,6 +253,31 @@ do daného data, `--od` bez `--do` zase od daného data po současnost. Datum lz
 psát jako `13.06.2026` i `2026-06-13`, hranice se berou v místním čase (`--od`
 od půlnoci, `--do` do konce dne).
 
+### Kešování dat (proměnná `CACHE`)
+
+Aby opakované hledání nestahovalo stále stejné soubory, program si stažená data
+ukládá na disk. Chování řídí proměnná `CACHE` úplně na začátku souboru
+`najdi.py`:
+
+```python
+CACHE = True   # výchozí stav: kešování zapnuté
+```
+
+Jak to funguje:
+
+- Stažené soubory se ukládají do složky **`cache/<kód-stanice>/`** vedle skriptu
+  (vytvoří se sama). Při dalším hledání se stejný soubor načte z disku, místo
+  aby se stahoval znovu — je to **rychlejší** a u už stažených dat to funguje
+  i **bez internetu**.
+- Kešují se **jen neměnná data** — uzavřené měsíce a dny **před dneškem**.
+  Aktuální (dnešní, resp. probíhající měsíc) soubor se **nikdy nekešuje** a vždy
+  se stáhne čerstvý, takže nikdy nedostaneš zastaralá dnešní data.
+- **Vypnutí:** nastav `CACHE = False`. Program pak nic neukládá ani nečte
+  z disku a vše stahuje vždy znovu.
+- **Vyprázdnění:** smaž složku `cache/` (klidně celou, vytvoří se zase).
+
+Složka `cache/` je jen lokální a do gitu se necommituje (je v `.gitignore`).
+
 ---
 
 ## Dobré vědět
@@ -263,11 +288,8 @@ od půlnoci, `--do` do konce dne).
 - Při prvním hledání stanice si program stáhne jejich seznam do souboru
   `stanice.json` a příště už ho čte **bez internetu**. Pro aktualizaci seznamu
   tento soubor smaž.
-- **Stažená data se kešují** do složky `cache/<kód-stanice>/`, takže opakované
-  hledání nestahuje stejné soubory znovu. Kešují se jen **uzavřená** data
-  (minulé měsíce a dny před dneškem) — aktuální den se vždy načte čerstvý.
-  Kešování vypneš nastavením `CACHE = False` na začátku `najdi.py`; cache
-  vyprázdníš smazáním složky `cache/`.
+- **Stažená data se kešují** na disk, aby opakované hledání bylo rychlé — viz
+  sekci [Kešování dat (proměnná `CACHE`)](#kešování-dat-proměnná-cache).
 - Během stahování běží na prvním řádku ukazatel průběhu, který se po dokončení
   nahradí `OK`.
 
