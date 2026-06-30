@@ -5,10 +5,12 @@ hydrometeorologického ústavu** a odpoví na otázky typu:
 
 - *Kdy na téhle stanici naposledy pršelo a jak dlouho?*
 - *Kdy bylo naposledy 35 °C a víc — a kolikrát za poslední dobu?*
+- *Kdy naposledy foukalo přes 15 m/s nebo ležel sníh?*
 - *Jaký kód má stanice v mém městě?*
 
-Pracuje s desetiminutovými měřeními z archivu ČHMÚ, který sahá zhruba **13 měsíců
-do minulosti**.
+Umí hledat **déšť, teplotu, mráz, vítr, vlhkost, sluneční svit i sníh** a pracuje
+s **desetiminutovými** i **denními** měřeními z archivu ČHMÚ, který sahá zhruba
+**13 měsíců do minulosti**.
 
 ---
 
@@ -31,6 +33,8 @@ Vše se ovládá jedním příkazem `najdi.py` a dvojicí hlavních voleb:
 
 - `--co` — **co** hledáš (`stanice`, nebo počasí: `dest`, `teplota`, `mraz`, `vitr`, `vlhko`, `slunce`, `snih`)
 - `--kde` — **kde** hledáš (název města u stanic, nebo kód stanice u počasí)
+
+Volitelně `--zdroj` přepíná mezi `10min` (výchozí) a `denni` daty (viz [sekci 5](#5-denní-data---zdroj)).
 
 Postup je vždy stejný:
 
@@ -230,6 +234,10 @@ Epizoda je **souvislé období**, kdy podmínka platila. Měření chodí po 10 
 Ve výchozím stavu (`--maximalni_prodleva 0`) jakýkoli výpadek epizodu ukončí.
 Když povolíš třeba `--maximalni_prodleva 30`, krátké přestávky do 30 minut se
 berou jako součást téže epizody (dva blízké dešťíky se spojí v jeden).
+
+U denního zdroje (`--zdroj denni`) je krok jeden den a epizoda jsou po sobě
+jdoucí dny; `--maximalni_prodleva` (v minutách) tam tak prakticky nemá smysl —
+ve výchozím stavu epizodu ukončí každý den, kdy podmínka neplatila.
 
 ### Omezení rozsahu pomocí `--od` a `--do`
 
