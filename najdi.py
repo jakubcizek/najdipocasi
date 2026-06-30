@@ -32,6 +32,10 @@ import threading
 import unicodedata
 import requests
 
+# Kešovat stažené (neměnné) datové soubory na disk do ./cache/<kód-stanice>/?
+# Při dalším hledání se použijí místo opakovaného stahování. Vypni nastavením False.
+CACHE = True
+
 # Český překlad systémových hlášek argparse (usage:, options:, nápověda -h, chyby).
 _ARGPARSE_CZ = {
     "usage: ": "použití: ",
@@ -64,8 +68,11 @@ BASE_10MIN = "https://opendata.chmi.cz/meteorology/climate/recent/data/10min/"
 BASE_DENNI = "https://opendata.chmi.cz/meteorology/climate/recent/data/daily/"
 META_DIR = "https://opendata.chmi.cz/meteorology/climate/recent/metadata/"
 
+# Adresáře vedle skriptu: cache datových souborů a uložený seznam stanic.
+SKRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+CACHE_DIR = os.path.join(SKRIPT_DIR, "cache")
 # Lokální kopie seznamu stanic – při prvním běhu se stáhne, pak se čte offline.
-CACHE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "stanice.json")
+STANICE_CACHE = os.path.join(SKRIPT_DIR, "stanice.json")
 
 # Pojistka, jak hluboko do minulosti smíme jít (archiv drží zhruba 13 měsíců).
 MAX_MESICU_ZPET = 24
@@ -260,12 +267,12 @@ def stahni_stanice():
 def nacti_stanice():
     """Vrátí seznam stanic. Pokud existuje lokální stanice.json, čte se z něj
     (offline). Jinak se data stáhnou a do stanice.json se uloží pro příště."""
-    if os.path.exists(CACHE):
-        with open(CACHE, encoding="utf-8") as f:
+    if os.path.exists(STANICE_CACHE):
+        with open(STANICE_CACHE, encoding="utf-8") as f:
             return json.load(f)
 
     stanice = stahni_stanice()
-    with open(CACHE, "w", encoding="utf-8") as f:
+    with open(STANICE_CACHE, "w", encoding="utf-8") as f:
         json.dump(stanice, f, ensure_ascii=False, indent=2)
     return stanice
 
@@ -322,13 +329,29 @@ def parse_datum(s):
                      f"(zkus 13.06.2026 nebo 2026-06-13)")
 
 
-def stahni(url):
-    """Vrátí naparsovaný JSON, nebo None pokud soubor neexistuje (404)."""
+def stahni(url, wsi=None, kesovat=False):
+    """Vrátí naparsovaný JSON, nebo None pokud soubor neexistuje (404).
+
+    Je-li zapnuté CACHE a soubor je neměnný (kesovat=True), čte se / ukládá se
+    do ./cache/<wsi>/<jméno-souboru>, takže se při dalším hledání nestahuje znovu."""
+    cesta = None
+    if CACHE and kesovat and wsi:
+        cesta = os.path.join(CACHE_DIR, wsi, url.rsplit("/", 1)[-1])
+        if os.path.exists(cesta):
+            with open(cesta, encoding="utf-8") as f:
+                return json.load(f)
+
     r = SESSION.get(url, timeout=30)
     if r.status_code == 404:
         return None
     r.raise_for_status()
-    return r.json()
+    data = r.json()
+
+    if cesta is not None:
+        os.makedirs(os.path.dirname(cesta), exist_ok=True)
+        with open(cesta, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False)
+    return data
 
 
 def hodnoty_z_payloadu(payload, element, dt_index, val_index):
@@ -358,13 +381,14 @@ def _o_mesic_zpet(rok, mesic):
 
 
 def soubory_10min(wsi, horni, dolni, dnes):
-    """Plán souborů 10min dat od nejnovějších po nejstarší. Vrací dvojice
-    (archiv?, url): aktuální měsíc po dnech, starší měsíce po měsíčním souboru."""
+    """Plán souborů 10min dat od nejnovějších po nejstarší. Vrací čtveřice
+    (archiv?, kešovat?, popis, url): aktuální měsíc po dnech, starší po měsících.
+    Kešovat lze jen neměnné soubory – uzavřené měsíce a dny před dneškem."""
     aktualni_prvni = dnes.replace(day=1)
     if horni >= aktualni_prvni:
         den = horni
         while den >= aktualni_prvni and (dolni is None or den >= dolni):
-            yield (False, f"Stahuji data za {den:%d.%m.%Y}",
+            yield (False, den < dnes, f"Stahuji data za {den:%d.%m.%Y}",
                    f"{BASE_10MIN}10m-{wsi}-{den:%Y%m%d}.json")
             den -= dt.timedelta(days=1)
         rok, mesic = _o_mesic_zpet(aktualni_prvni.year, aktualni_prvni.month)
@@ -374,14 +398,15 @@ def soubory_10min(wsi, horni, dolni, dnes):
     for _ in range(MAX_MESICU_ZPET):
         if dolni is not None and (rok, mesic) < (dolni.year, dolni.month):
             break
-        yield (True, f"Stahuji data za {rok}-{mesic:02d}",
+        yield (True, True, f"Stahuji data za {rok}-{mesic:02d}",
                f"{BASE_10MIN}{mesic:02d}/10m-{wsi}-{rok:04d}{mesic:02d}.json")
         rok, mesic = _o_mesic_zpet(rok, mesic)
 
 
 def soubory_denni(wsi, horni, dolni, dnes):
     """Plán souborů denních dat – jeden soubor na měsíc (aktuální měsíc v kořeni,
-    starší měsíce v podsložce MM/), od nejnovějšího po nejstarší."""
+    starší měsíce v podsložce MM/), od nejnovějšího po nejstarší. Kešovat lze
+    jen uzavřené (minulé) měsíce; aktuální se ještě plní."""
     aktualni = (dnes.year, dnes.month)
     rok, mesic = horni.year, horni.month
     for _ in range(MAX_MESICU_ZPET):
@@ -389,9 +414,10 @@ def soubory_denni(wsi, horni, dolni, dnes):
             break
         oznam = f"Stahuji data za {rok}-{mesic:02d}"
         if (rok, mesic) == aktualni:
-            yield False, oznam, f"{BASE_DENNI}dly-{wsi}-{rok:04d}{mesic:02d}.json"
+            yield (False, False, oznam,
+                   f"{BASE_DENNI}dly-{wsi}-{rok:04d}{mesic:02d}.json")
         else:
-            yield (True, oznam,
+            yield (True, True, oznam,
                    f"{BASE_DENNI}{mesic:02d}/dly-{wsi}-{rok:04d}{mesic:02d}.json")
         rok, mesic = _o_mesic_zpet(rok, mesic)
 
@@ -413,9 +439,9 @@ def zaznamy_zpet(zdroj, wsi, element, od_dt=None, do_dt=None):
     dolni = None if od_dt is None else od_dt.astimezone(dt.timezone.utc).date()
 
     dt_i, val_i = zdroj["dt_index"], zdroj["val_index"]
-    for archiv, oznam, url in zdroj["soubory"](wsi, horni, dolni, dnes):
+    for archiv, kesovat, oznam, url in zdroj["soubory"](wsi, horni, dolni, dnes):
         _oznam(oznam)
-        payload = stahni(url)
+        payload = stahni(url, wsi, kesovat)
         if payload is None:
             if archiv:
                 break  # archiv končí – starší data nemáme

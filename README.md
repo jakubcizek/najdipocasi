@@ -263,6 +263,11 @@ od půlnoci, `--do` do konce dne).
 - Při prvním hledání stanice si program stáhne jejich seznam do souboru
   `stanice.json` a příště už ho čte **bez internetu**. Pro aktualizaci seznamu
   tento soubor smaž.
+- **Stažená data se kešují** do složky `cache/<kód-stanice>/`, takže opakované
+  hledání nestahuje stejné soubory znovu. Kešují se jen **uzavřená** data
+  (minulé měsíce a dny před dneškem) — aktuální den se vždy načte čerstvý.
+  Kešování vypneš nastavením `CACHE = False` na začátku `najdi.py`; cache
+  vyprázdníš smazáním složky `cache/`.
 - Během stahování běží na prvním řádku ukazatel průběhu, který se po dokončení
   nahradí `OK`.
 
