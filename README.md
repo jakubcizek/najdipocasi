@@ -29,7 +29,7 @@ do minulosti**.
 
 Vše se ovládá jedním příkazem `najdi.py` a dvojicí hlavních voleb:
 
-- `--co` — **co** hledáš (`stanice`, `dest`, `teplota`)
+- `--co` — **co** hledáš (`stanice`, nebo počasí: `dest`, `teplota`, `mraz`, `vitr`, `vlhko`, `slunce`)
 - `--kde` — **kde** hledáš (název města u stanic, nebo kód stanice u počasí)
 
 Postup je vždy stejný:
@@ -129,11 +129,43 @@ python najdi.py --co teplota --kde 0-20000-0-11723 --kolik "<0"
 
 ---
 
+## 4. Další jevy
+
+Stejná logika (poslední souvislé epizody) funguje i pro vítr, vlhkost, sluneční
+svit a přízemní mráz. Liší se jen tím, co `--co` říká a co se vypíše jako souhrn:
+
+| `--co` | Co hledá | `--kolik` | Souhrn epizody |
+|--------|----------|-----------|----------------|
+| `dest` | Srážky (mm za 10 min) | volitelné (výchozí > 0) | celkový úhrn |
+| `teplota` | Teplota vzduchu (°C) | **povinné** | nejvyšší teplota |
+| `mraz` | Přízemní teplota při zemi (°C) | volitelné (výchozí < 0) | nejnižší teplota |
+| `vitr` | Nárazy větru (m/s) | **povinné** | nejsilnější náraz |
+| `vlhko` | Relativní vlhkost (%) | **povinné** | nejvyšší vlhkost |
+| `slunce` | Sluneční svit (min za 10 min) | volitelné (výchozí > 0) | minuty svitu celkem |
+
+Příklady:
+
+```
+python najdi.py --co vitr   --kde 0-203-0-11721 --kolik ">=15" --hloubka 3
+python najdi.py --co vlhko  --kde 0-203-0-11721 --kolik ">=90"
+python najdi.py --co slunce --kde 0-203-0-11721
+python najdi.py --co mraz   --kde 0-203-0-11721 --do 28.02.2026
+```
+
+```
+Stanice 0-203-0-11721: náraz větru >= 15 m/s — posledních 3 epizod (místní čas):
+1. 29.06.2026 17:10 – 17:20  (délka 10 min, max. náraz 17.2 m/s)
+2. 31.05.2026 17:20 – 17:30  (délka 10 min, max. náraz 15 m/s)
+3. 11.05.2026 14:00 – 14:10  (délka 10 min, max. náraz 15.1 m/s)
+```
+
+---
+
 ## Přehled voleb
 
 | Volba | Zkratka | Význam |
 |-------|---------|--------|
-| `--co` | `-c` | Co hledat: `stanice`, `dest`, `teplota`. **Povinné.** |
+| `--co` | `-c` | Co hledat: `stanice`, nebo počasí (`dest`, `teplota`, `mraz`, `vitr`, `vlhko`, `slunce`). **Povinné.** |
 | `--kde` | | Město/název u stanic, nebo WSI kód stanice u počasí. **Povinné.** |
 | `--kolik` | `-k` | Práh hodnoty s operátorem, např. `">=35"`, `"<0"`, `">=1"`. U teploty **povinné**, u deště volitelné (výchozí: jakýkoli úhrn > 0). |
 | `--hloubka` | `-d` | Kolik posledních epizod vypsat (výchozí 1). |

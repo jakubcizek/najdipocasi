@@ -84,6 +84,30 @@ JEVY = {
         "veta": "Naposledy naměřeno:", "souhrn_label": "max. teplota",
         "souhrn_fn": max, "vyzaduje_kolik": True, "vychozi": None,
     },
+    "mraz": {
+        "element": "TPM", "jednotka": "°C", "popis": "přízemní teplota",
+        "veta": "Naposledy mrzlo při zemi:", "souhrn_label": "min. teplota",
+        "souhrn_fn": min, "vyzaduje_kolik": False,
+        "vychozi": (operator.lt, "<", 0.0),
+    },
+    "vitr": {
+        "element": "Fmax", "jednotka": "m/s", "popis": "náraz větru",
+        "veta": "Naposledy foukalo:", "souhrn_label": "max. náraz",
+        "souhrn_fn": max, "vyzaduje_kolik": True, "vychozi": None,
+    },
+    "vlhko": {
+        "element": "H", "jednotka": "%", "popis": "vlhkost",
+        "veta": "Naposledy naměřeno:", "souhrn_label": "max. vlhkost",
+        "souhrn_fn": max, "vyzaduje_kolik": True, "vychozi": None,
+    },
+    "slunce": {
+        "element": "SSV10M", "jednotka": "min", "popis": "sluneční svit",
+        "veta": "Naposledy svítilo slunce:", "souhrn_label": "svit celkem",
+        "souhrn_fn": lambda vals: round(sum(vals)), "vyzaduje_kolik": False,
+        "vychozi": (operator.gt, ">", 0.0),
+        # V datech jsou sekundy svitu za 10 min; přepočítáme na minuty.
+        "prevod": lambda s: s / 60,
+    },
 }
 
 OPERATORY = {
@@ -274,10 +298,14 @@ def hodnoty_z_payloadu(payload, element):
     # Řádek: [STATION, ELEMENT, DT, VAL, FLAG, QUALITY]
     zaznamy = []
     for _, el, datum, hodnota, *_ in vals:
-        if el != element or hodnota is None:
+        if el != element or hodnota is None or hodnota == "":
             continue
-        zaznamy.append((dt.datetime.fromisoformat(datum.replace("Z", "+00:00")),
-                        float(hodnota)))
+        try:
+            cislo = float(hodnota)
+        except (TypeError, ValueError):
+            continue  # nečíselná hodnota (např. prázdný svit v noci)
+        zaznamy.append(
+            (dt.datetime.fromisoformat(datum.replace("Z", "+00:00")), cislo))
     zaznamy.sort(key=lambda z: z[0], reverse=True)
     return zaznamy
 
@@ -345,16 +373,20 @@ def zaznamy_zpet(wsi, element, od_dt=None, do_dt=None):
             mesic, rok = 12, rok - 1
 
 
-def najdi_epizody(wsi, element, podminka, hloubka, limit, od_dt=None, do_dt=None):
+def najdi_epizody(wsi, element, podminka, hloubka, limit,
+                  od_dt=None, do_dt=None, prevod=None):
     """Najde až `hloubka` po sobě jdoucích epizod (směrem do minulosti), kdy
     `podminka(hodnota)` platí. `limit` je největší přípustný časový rozestup
-    mezi sousedními výskyty téže epizody. Volitelné od_dt/do_dt omezí rozsah.
+    mezi sousedními výskyty téže epizody. Volitelné od_dt/do_dt omezí rozsah,
+    `prevod` přepočítá surovou hodnotu (např. sekundy svitu na minuty).
     Vrací seznam (zacatek, konec, hodnoty) v UTC od nejnovější po nejstarší."""
     epizody = []
     konec = zacatek = None
     hodnoty = []
 
     for cas, val in zaznamy_zpet(wsi, element, od_dt, do_dt):
+        if prevod is not None:
+            val = prevod(val)
         jev = podminka(val)
         if konec is None:
             # Hledáme konec další epizody = poslední výskyt splňující podmínku.
@@ -419,7 +451,8 @@ def main():
                              "kódu k vyhledání (např. \"Brno\")")
     parser.add_argument("-c", "--co", required=True,
                         choices=sorted(JEVY) + ["stanice"],
-                        help="co hledat: stanice, dest, teplota")
+                        help="co hledat: stanice, nebo počasí (dest, teplota, "
+                             "mraz, vitr, vlhko, slunce)")
     parser.add_argument("-k", "--kolik",
                         help="práh hodnoty s operátorem, např. \">=35\" "
                              "(povinné pro teplotu, u deště volitelné – "
@@ -487,7 +520,8 @@ def main():
     PRUBEH.start("Stahuji data")
     try:
         epizody = najdi_epizody(args.kde, jev["element"], podminka,
-                                args.hloubka, limit, od_dt, do_dt)
+                                args.hloubka, limit, od_dt, do_dt,
+                                jev.get("prevod"))
     finally:
         PRUBEH.hotovo()
 
