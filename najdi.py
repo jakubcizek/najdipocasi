@@ -60,7 +60,8 @@ _ARGPARSE_CZ = {
 }
 argparse._ = lambda text: _ARGPARSE_CZ.get(text, text)
 
-BASE = "https://opendata.chmi.cz/meteorology/climate/recent/data/10min/"
+BASE_10MIN = "https://opendata.chmi.cz/meteorology/climate/recent/data/10min/"
+BASE_DENNI = "https://opendata.chmi.cz/meteorology/climate/recent/data/daily/"
 META_DIR = "https://opendata.chmi.cz/meteorology/climate/recent/metadata/"
 
 # Lokální kopie seznamu stanic – při prvním běhu se stáhne, pak se čte offline.
@@ -69,11 +70,12 @@ CACHE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "stanice.json")
 # Pojistka, jak hluboko do minulosti smíme jít (archiv drží zhruba 13 měsíců).
 MAX_MESICU_ZPET = 24
 
-# Jeden záznam udává hodnotu za předcházejících 10 minut.
-KROK = dt.timedelta(minutes=10)
+# Krok měření jednotlivých zdrojů (rozestup sousedních záznamů).
+KROK_10MIN = dt.timedelta(minutes=10)
+KROK_DENNI = dt.timedelta(days=1)
 
-# Podporované jevy: element v datech, jednotka a způsob souhrnu epizody.
-JEVY = {
+# Jevy pro 10minutová data: element, jednotka a způsob souhrnu epizody.
+JEVY_10MIN = {
     "dest": {
         "element": "SRA10M", "jednotka": "mm", "popis": "úhrn srážek",
         "veta": "Naposledy pršelo:", "souhrn_label": "úhrn", "souhrn_fn": sum,
@@ -107,6 +109,44 @@ JEVY = {
         "vychozi": (operator.gt, ">", 0.0),
         # V datech jsou sekundy svitu za 10 min; přepočítáme na minuty.
         "prevod": lambda s: s / 60,
+    },
+}
+
+# Jevy pro denní data: jiné kódy elementů (denní agregáty), navíc sníh.
+# Epizoda zde znamená po sobě jdoucí dny.
+JEVY_DENNI = {
+    "dest": {
+        "element": "SRA", "jednotka": "mm", "popis": "denní úhrn srážek",
+        "veta": "Naposledy pršelo:", "souhrn_label": "úhrn", "souhrn_fn": sum,
+        "vyzaduje_kolik": False, "vychozi": (operator.gt, ">", 0.0),
+    },
+    "teplota": {
+        "element": "TMA", "jednotka": "°C", "popis": "denní maximum teploty",
+        "veta": "Naposledy naměřeno:", "souhrn_label": "max. teplota",
+        "souhrn_fn": max, "vyzaduje_kolik": True, "vychozi": None,
+    },
+    "mraz": {
+        "element": "TPM", "jednotka": "°C", "popis": "přízemní teplota",
+        "veta": "Naposledy mrzlo při zemi:", "souhrn_label": "min. teplota",
+        "souhrn_fn": min, "vyzaduje_kolik": False,
+        "vychozi": (operator.lt, "<", 0.0),
+    },
+    "vitr": {
+        "element": "Fmax", "jednotka": "m/s", "popis": "náraz větru",
+        "veta": "Naposledy foukalo:", "souhrn_label": "max. náraz",
+        "souhrn_fn": max, "vyzaduje_kolik": True, "vychozi": None,
+    },
+    "slunce": {
+        "element": "SSV", "jednotka": "hod", "popis": "sluneční svit",
+        "veta": "Naposledy svítilo slunce:", "souhrn_label": "svit celkem",
+        "souhrn_fn": sum, "vyzaduje_kolik": False,
+        "vychozi": (operator.gt, ">", 0.0),
+    },
+    "snih": {
+        "element": "SCE", "jednotka": "cm", "popis": "výška sněhu",
+        "veta": "Naposledy ležel sníh:", "souhrn_label": "max. výška",
+        "souhrn_fn": max, "vyzaduje_kolik": False,
+        "vychozi": (operator.gt, ">", 0.0),
     },
 }
 
@@ -291,37 +331,74 @@ def stahni(url):
     return r.json()
 
 
-def hodnoty_z_payloadu(payload, element):
+def hodnoty_z_payloadu(payload, element, dt_index, val_index):
     """Z JSON payloadu vytáhne dvojice (datetime, hodnota) pro daný element,
-    seřazené sestupně podle času (nejnovější první)."""
-    vals = payload["data"]["data"]["values"]
-    # Řádek: [STATION, ELEMENT, DT, VAL, FLAG, QUALITY]
+    seřazené sestupně podle času (nejnovější první). Sloupce DT a VAL se berou
+    podle zadaných indexů (liší se mezi 10min a denními daty)."""
     zaznamy = []
-    for _, el, datum, hodnota, *_ in vals:
-        if el != element or hodnota is None or hodnota == "":
+    for row in payload["data"]["data"]["values"]:
+        if row[1] != element:
+            continue
+        hodnota = row[val_index]
+        if hodnota is None or hodnota == "":
             continue
         try:
             cislo = float(hodnota)
         except (TypeError, ValueError):
             continue  # nečíselná hodnota (např. prázdný svit v noci)
-        zaznamy.append(
-            (dt.datetime.fromisoformat(datum.replace("Z", "+00:00")), cislo))
+        cas = dt.datetime.fromisoformat(row[dt_index].replace("Z", "+00:00"))
+        zaznamy.append((cas, cislo))
     zaznamy.sort(key=lambda z: z[0], reverse=True)
     return zaznamy
 
 
-def soubor_dne(wsi, den):
-    return f"{BASE}10m-{wsi}-{den:%Y%m%d}.json"
+def _o_mesic_zpet(rok, mesic):
+    mesic -= 1
+    return (rok - 1, 12) if mesic == 0 else (rok, mesic)
 
 
-def soubor_mesice(wsi, rok, mesic):
-    return f"{BASE}{mesic:02d}/10m-{wsi}-{rok:04d}{mesic:02d}.json"
+def soubory_10min(wsi, horni, dolni, dnes):
+    """Plán souborů 10min dat od nejnovějších po nejstarší. Vrací dvojice
+    (archiv?, url): aktuální měsíc po dnech, starší měsíce po měsíčním souboru."""
+    aktualni_prvni = dnes.replace(day=1)
+    if horni >= aktualni_prvni:
+        den = horni
+        while den >= aktualni_prvni and (dolni is None or den >= dolni):
+            yield (False, f"Stahuji data za {den:%d.%m.%Y}",
+                   f"{BASE_10MIN}10m-{wsi}-{den:%Y%m%d}.json")
+            den -= dt.timedelta(days=1)
+        rok, mesic = _o_mesic_zpet(aktualni_prvni.year, aktualni_prvni.month)
+    else:
+        rok, mesic = horni.year, horni.month
+
+    for _ in range(MAX_MESICU_ZPET):
+        if dolni is not None and (rok, mesic) < (dolni.year, dolni.month):
+            break
+        yield (True, f"Stahuji data za {rok}-{mesic:02d}",
+               f"{BASE_10MIN}{mesic:02d}/10m-{wsi}-{rok:04d}{mesic:02d}.json")
+        rok, mesic = _o_mesic_zpet(rok, mesic)
 
 
-def zaznamy_zpet(wsi, element, od_dt=None, do_dt=None):
-    """Líně generuje záznamy (datetime, hodnota) od nejnovějších po nejstarší.
-    Soubory stahuje až ve chvíli, kdy jsou potřeba, a plynule přechází z denních
-    souborů aktuálního měsíce na měsíční archiv.
+def soubory_denni(wsi, horni, dolni, dnes):
+    """Plán souborů denních dat – jeden soubor na měsíc (aktuální měsíc v kořeni,
+    starší měsíce v podsložce MM/), od nejnovějšího po nejstarší."""
+    aktualni = (dnes.year, dnes.month)
+    rok, mesic = horni.year, horni.month
+    for _ in range(MAX_MESICU_ZPET):
+        if dolni is not None and (rok, mesic) < (dolni.year, dolni.month):
+            break
+        oznam = f"Stahuji data za {rok}-{mesic:02d}"
+        if (rok, mesic) == aktualni:
+            yield False, oznam, f"{BASE_DENNI}dly-{wsi}-{rok:04d}{mesic:02d}.json"
+        else:
+            yield (True, oznam,
+                   f"{BASE_DENNI}{mesic:02d}/dly-{wsi}-{rok:04d}{mesic:02d}.json")
+        rok, mesic = _o_mesic_zpet(rok, mesic)
+
+
+def zaznamy_zpet(zdroj, wsi, element, od_dt=None, do_dt=None):
+    """Líně generuje záznamy (datetime, hodnota) od nejnovějších po nejstarší
+    z daného zdroje. Soubory stahuje až ve chvíli, kdy jsou potřeba.
 
     Volitelné meze od_dt/do_dt (aware datetime) omezí jak rozsah vydaných
     záznamů, tak rozsah stahovaných souborů – díky tomu se neprochází celý
@@ -330,50 +407,39 @@ def zaznamy_zpet(wsi, element, od_dt=None, do_dt=None):
         return ((od_dt is None or cas >= od_dt)
                 and (do_dt is None or cas <= do_dt))
 
-    def vydej(payload):
-        for cas, val in hodnoty_z_payloadu(payload, element):
+    dnes = dt.datetime.now(dt.timezone.utc).date()
+    horni = dnes if do_dt is None else min(
+        dnes, do_dt.astimezone(dt.timezone.utc).date())
+    dolni = None if od_dt is None else od_dt.astimezone(dt.timezone.utc).date()
+
+    dt_i, val_i = zdroj["dt_index"], zdroj["val_index"]
+    for archiv, oznam, url in zdroj["soubory"](wsi, horni, dolni, dnes):
+        _oznam(oznam)
+        payload = stahni(url)
+        if payload is None:
+            if archiv:
+                break  # archiv končí – starší data nemáme
+            continue   # chybějící aktuální soubor (např. den) přeskočíme
+        for cas, val in hodnoty_z_payloadu(payload, element, dt_i, val_i):
             if v_rozsahu(cas):
                 yield cas, val
 
-    dnes = dt.datetime.now(dt.timezone.utc).date()
-    aktualni_prvni = dnes.replace(day=1)
 
-    # Horní/dolní mez pro výběr souborů (UTC datum).
-    horni = dnes if do_dt is None else min(dnes, do_dt.astimezone(dt.timezone.utc).date())
-    dolni = None if od_dt is None else od_dt.astimezone(dt.timezone.utc).date()
-
-    # 1) Aktuální měsíc po dnech (archiv ho ještě nemá jako měsíční soubor).
-    if horni >= aktualni_prvni:
-        den = horni
-        while den >= aktualni_prvni and (dolni is None or den >= dolni):
-            _oznam(f"Stahuji data za {den:%d.%m.%Y}")
-            payload = stahni(soubor_dne(wsi, den))
-            if payload:
-                yield from vydej(payload)
-            den -= dt.timedelta(days=1)
-        rok, mesic = aktualni_prvni.year, aktualni_prvni.month - 1
-    else:
-        # Okno celé v minulosti – začínáme rovnou v měsíci horní meze.
-        rok, mesic = horni.year, horni.month
-
-    if mesic == 0:
-        mesic, rok = 12, rok - 1
-
-    # 2) Starší měsíce po jednom souboru, dokud archiv nějaký vrací.
-    for _ in range(MAX_MESICU_ZPET):
-        if dolni is not None and (rok, mesic) < (dolni.year, dolni.month):
-            break  # celý měsíc je pod dolní mezí
-        _oznam(f"Stahuji data za {rok}-{mesic:02d}")
-        payload = stahni(soubor_mesice(wsi, rok, mesic))
-        if payload is None:
-            break  # archiv končí – starší data nemáme
-        yield from vydej(payload)
-        mesic -= 1
-        if mesic == 0:
-            mesic, rok = 12, rok - 1
+# Definice zdrojů archivu. `dt_index`/`val_index` udávají sloupce DT a VAL,
+# `denni` přepíná zobrazení (datumy + délka ve dnech místo času).
+ZDROJE = {
+    "10min": {
+        "krok": KROK_10MIN, "dt_index": 2, "val_index": 3,
+        "soubory": soubory_10min, "denni": False, "jevy": JEVY_10MIN,
+    },
+    "denni": {
+        "krok": KROK_DENNI, "dt_index": 3, "val_index": 4,
+        "soubory": soubory_denni, "denni": True, "jevy": JEVY_DENNI,
+    },
+}
 
 
-def najdi_epizody(wsi, element, podminka, hloubka, limit,
+def najdi_epizody(zdroj, wsi, element, podminka, hloubka, limit,
                   od_dt=None, do_dt=None, prevod=None):
     """Najde až `hloubka` po sobě jdoucích epizod (směrem do minulosti), kdy
     `podminka(hodnota)` platí. `limit` je největší přípustný časový rozestup
@@ -384,7 +450,7 @@ def najdi_epizody(wsi, element, podminka, hloubka, limit,
     konec = zacatek = None
     hodnoty = []
 
-    for cas, val in zaznamy_zpet(wsi, element, od_dt, do_dt):
+    for cas, val in zaznamy_zpet(zdroj, wsi, element, od_dt, do_dt):
         if prevod is not None:
             val = prevod(val)
         jev = podminka(val)
@@ -420,8 +486,16 @@ def najdi_epizody(wsi, element, podminka, hloubka, limit,
     return epizody
 
 
-def popis_delky(delta):
-    """Naformátuje dobu trvání např. '1 h 20 min' nebo '40 min'."""
+def popis_delky(delta, denni):
+    """Naformátuje dobu trvání. U denních dat ve dnech (1 den / 2 dny / 5 dní),
+    jinak v hodinách a minutách."""
+    if denni:
+        dny = round(delta.total_seconds() / 86400)
+        if dny == 1:
+            return "1 den"
+        if 2 <= dny <= 4:
+            return f"{dny} dny"
+        return f"{dny} dní"
     minuty = int(delta.total_seconds() // 60)
     h, m = divmod(minuty, 60)
     if h and m:
@@ -431,10 +505,16 @@ def popis_delky(delta):
     return f"{m} min"
 
 
-def formatuj_rozsah(zacatek, konec):
-    """Vrátí rozsah epizody v místním čase. Epizoda pokrývá interval
-    od (začátek - 10 min) do konce posledního záznamu."""
-    z_loc = (zacatek - KROK).astimezone()
+def formatuj_rozsah(zacatek, konec, krok, denni):
+    """Vrátí rozsah epizody v místním čase. U denních dat jen data, u 10min
+    časy (epizoda pokrývá interval od začátku - krok do konce posledního
+    záznamu)."""
+    if denni:
+        z_loc, k_loc = zacatek.astimezone(), konec.astimezone()
+        if z_loc.date() == k_loc.date():
+            return f"{z_loc:%d.%m.%Y}"
+        return f"{z_loc:%d.%m.%Y} – {k_loc:%d.%m.%Y}"
+    z_loc = (zacatek - krok).astimezone()
     k_loc = konec.astimezone()
     if z_loc.date() == k_loc.date():
         return f"{z_loc:%d.%m.%Y %H:%M} – {k_loc:%H:%M}"
@@ -449,10 +529,15 @@ def main():
     parser.add_argument("--kde", required=True,
                         help="WSI kód stanice; u --co stanice část názvu nebo "
                              "kódu k vyhledání (např. \"Brno\")")
+    vsechny_jevy = sorted(set(JEVY_10MIN) | set(JEVY_DENNI))
     parser.add_argument("-c", "--co", required=True,
-                        choices=sorted(JEVY) + ["stanice"],
+                        choices=vsechny_jevy + ["stanice"],
                         help="co hledat: stanice, nebo počasí (dest, teplota, "
-                             "mraz, vitr, vlhko, slunce)")
+                             "mraz, vitr, vlhko, slunce, snih) – dostupnost "
+                             "závisí na --zdroj")
+    parser.add_argument("-z", "--zdroj", choices=sorted(ZDROJE), default="10min",
+                        help="zdroj dat: 10min (výchozí) nebo denni "
+                             "(denní agregáty: sníh, denní úhrny, epizoda = dny)")
     parser.add_argument("-k", "--kolik",
                         help="práh hodnoty s operátorem, např. \">=35\" "
                              "(povinné pro teplotu, u deště volitelné – "
@@ -487,7 +572,12 @@ def main():
     if args.maximalni_prodleva < 0:
         parser.error("--maximalni_prodleva nesmí být záporná")
 
-    jev = JEVY[args.co]
+    zdroj = ZDROJE[args.zdroj]
+    if args.co not in zdroj["jevy"]:
+        dostupne = ", ".join(sorted(zdroj["jevy"]))
+        parser.error(f"jev „{args.co}“ není ve zdroji {args.zdroj} dostupný "
+                     f"(dostupné: {dostupne})")
+    jev = zdroj["jevy"][args.co]
     if args.kolik:
         try:
             cmp, op, prah = parse_kolik(args.kolik)
@@ -512,14 +602,15 @@ def main():
     if od_dt and do_dt and od_dt > do_dt:
         parser.error("--od je pozdější než --do")
 
+    krok, denni = zdroj["krok"], zdroj["denni"]
     podminka = lambda v: cmp(v, prah)
-    limit = KROK + dt.timedelta(minutes=args.maximalni_prodleva)
+    limit = krok + dt.timedelta(minutes=args.maximalni_prodleva)
     popis = f"{jev['popis']} {op} {prah:g} {jev['jednotka']}"
 
     PRUBEH = Prubeh()
     PRUBEH.start("Stahuji data")
     try:
-        epizody = najdi_epizody(args.kde, jev["element"], podminka,
+        epizody = najdi_epizody(zdroj, args.kde, jev["element"], podminka,
                                 args.hloubka, limit, od_dt, do_dt,
                                 jev.get("prevod"))
     finally:
@@ -532,21 +623,22 @@ def main():
 
     if args.hloubka == 1:
         zacatek, konec, hodnoty = epizody[0]
-        delka = (konec - zacatek) + KROK
+        delka = (konec - zacatek) + krok
         souhrn = jev["souhrn_fn"](hodnoty)
         print(f"Stanice {args.kde}: {popis}")
-        print(f"{jev['veta']} {formatuj_rozsah(zacatek, konec)} (místní čas)")
-        print(f"Délka: {popis_delky(delka)}")
+        print(f"{jev['veta']} {formatuj_rozsah(zacatek, konec, krok, denni)} "
+              f"(místní čas)")
+        print(f"Délka: {popis_delky(delka, denni)}")
         print(f"{jev['souhrn_label'].capitalize()}: {souhrn:g} {jev['jednotka']}")
         return
 
     print(f"Stanice {args.kde}: {popis} — posledních {len(epizody)} epizod "
           f"(místní čas):")
     for i, (zacatek, konec, hodnoty) in enumerate(epizody, 1):
-        delka = (konec - zacatek) + KROK
+        delka = (konec - zacatek) + krok
         souhrn = jev["souhrn_fn"](hodnoty)
-        print(f"{i}. {formatuj_rozsah(zacatek, konec)}  "
-              f"(délka {popis_delky(delka)}, {jev['souhrn_label']} "
+        print(f"{i}. {formatuj_rozsah(zacatek, konec, krok, denni)}  "
+              f"(délka {popis_delky(delka, denni)}, {jev['souhrn_label']} "
               f"{souhrn:g} {jev['jednotka']})")
 
 
