@@ -226,6 +226,40 @@ def _oznam(zprava):
         PRUBEH.uprav(zprava)
 
 
+# ---------- Výpis do orámované tabulky ----------
+
+def tabulka(hlavicka, radky, zarovnani=None, nadpis=None):
+    """Vypíše data jako orámovanou tabulku (Unicode rám). `zarovnani` je seznam
+    'l'/'r' pro každý sloupec (výchozí vlevo). Volitelný `nadpis` se vytiskne
+    nad tabulku. Kolem výpisu je prázdný řádek pro oddělení."""
+    radky = [[str(b) for b in r] for r in radky]
+    hlavicka = [str(h) for h in hlavicka]
+    if zarovnani is None:
+        zarovnani = ["l"] * len(hlavicka)
+    sirky = [max(len(bunky[i]) for bunky in [hlavicka] + radky)
+             for i in range(len(hlavicka))]
+
+    def radek(bunky):
+        cs = [(b.rjust(w) if z == "r" else b.ljust(w))
+              for b, w, z in zip(bunky, sirky, zarovnani)]
+        return "│ " + " │ ".join(cs) + " │"
+
+    def cara(l, m, r):
+        return l + m.join("─" * (w + 2) for w in sirky) + r
+
+    print()
+    if nadpis:
+        print(nadpis)
+        print()
+    print(cara("┌", "┬", "┐"))
+    print(radek(hlavicka))
+    print(cara("├", "┼", "┤"))
+    for r in radky:
+        print(radek(r))
+    print(cara("└", "┴", "┘"))
+    print()
+
+
 # ---------- Vyhledávání stanic (--co stanice) ----------
 
 def bez_diakritiky(s):
@@ -290,20 +324,15 @@ def hledej_stanice(dotaz):
 
 def vypis_stanice(nalezene, dotaz):
     if not nalezene:
-        print(f"Žádná stanice neodpovídá dotazu „{dotaz}“.")
+        print(f"\nŽádná stanice neodpovídá dotazu „{dotaz}“.\n")
         return
 
     nalezene.sort(key=lambda s: bez_diakritiky(s["nazev"]))
-    nadpis = "WSI kód (vlož do --kde)"
-    sirka_wsi = max([len(nadpis)] + [len(s["wsi"]) for s in nalezene])
-    print(f"{nadpis:<{sirka_wsi}}  Stanice (poloha; nadm. výška; měří od)")
-    print("-" * (sirka_wsi + 40))
-    for s in nalezene:
-        rok = str(s["od"])[:4]
-        print(f"{s['wsi']:<{sirka_wsi}}  "
-              f"{s['nazev']}  ({s['lat']}, {s['lon']}; {s['vyska']:g} m n.m.; "
-              f"od {rok})")
-    print(f"\nNalezeno stanic: {len(nalezene)}")
+    radky = [[s["wsi"], s["nazev"], f"{s['lat']}, {s['lon']}",
+              f"{s['vyska']:g} m", str(s["od"])[:4]] for s in nalezene]
+    tabulka(["WSI kód (--kde)", "Stanice", "Zeměpisná poloha", "Výška", "Od"],
+            radky,
+            nadpis=f"Nalezené stanice pro „{dotaz}“ ({len(nalezene)}):")
 
 
 # ---------- Vyhledávání jevů v čase (--co dest / teplota) ----------
@@ -658,29 +687,21 @@ def main():
         PRUBEH.hotovo()
 
     if not epizody:
-        print(f"Stanice {args.kde}: pro podmínku {popis} nebyl v dostupných "
-              f"datech (archiv ČHMÚ) nalezen žádný výskyt.")
+        print(f"\nStanice {args.kde}: pro podmínku {popis} nebyl v dostupných "
+              f"datech (archiv ČHMÚ) nalezen žádný výskyt.\n")
         return
 
-    if args.hloubka == 1:
-        zacatek, konec, hodnoty = epizody[0]
-        delka = (konec - zacatek) + krok
-        souhrn = jev["souhrn_fn"](hodnoty)
-        print(f"Stanice {args.kde}: {popis}")
-        print(f"{jev['veta']} {formatuj_rozsah(zacatek, konec, krok, denni)} "
-              f"(místní čas)")
-        print(f"Délka: {popis_delky(delka, denni)}")
-        print(f"{jev['souhrn_label'].capitalize()}: {souhrn:g} {jev['jednotka']}")
-        return
-
-    print(f"Stanice {args.kde}: {popis} — posledních {len(epizody)} epizod "
-          f"(místní čas):")
+    radky = []
     for i, (zacatek, konec, hodnoty) in enumerate(epizody, 1):
         delka = (konec - zacatek) + krok
         souhrn = jev["souhrn_fn"](hodnoty)
-        print(f"{i}. {formatuj_rozsah(zacatek, konec, krok, denni)}  "
-              f"(délka {popis_delky(delka, denni)}, {jev['souhrn_label']} "
-              f"{souhrn:g} {jev['jednotka']})")
+        radky.append([i, formatuj_rozsah(zacatek, konec, krok, denni),
+                      popis_delky(delka, denni),
+                      f"{souhrn:g} {jev['jednotka']}"])
+
+    tabulka(["#", "Období", "Délka", jev["souhrn_label"].capitalize()],
+            radky, zarovnani=["r", "l", "r", "r"],
+            nadpis=f"Stanice {args.kde} — {popis}  (místní čas)")
 
 
 if __name__ == "__main__":
