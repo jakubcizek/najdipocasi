@@ -21,6 +21,7 @@ Použití:
     python najdi.py --co teplota --kde 0-20000-0-11723 --kolik ">=35" --hloubka 10"""
 
 import argparse
+import calendar
 import datetime as dt
 import itertools
 import json
@@ -380,55 +381,66 @@ def _o_mesic_zpet(rok, mesic):
     return (rok - 1, 12) if mesic == 0 else (rok, mesic)
 
 
-def soubory_10min(wsi, horni, dolni, dnes):
-    """Plán souborů 10min dat od nejnovějších po nejstarší. Vrací čtveřice
-    (archiv?, kešovat?, popis, url): aktuální měsíc po dnech, starší po měsících.
-    Kešovat lze jen neměnné soubory – uzavřené měsíce a dny před dneškem."""
-    aktualni_prvni = dnes.replace(day=1)
-    if horni >= aktualni_prvni:
-        den = horni
-        while den >= aktualni_prvni and (dolni is None or den >= dolni):
-            yield (False, den < dnes, f"Stahuji data za {den:%d.%m.%Y}",
-                   f"{BASE_10MIN}10m-{wsi}-{den:%Y%m%d}.json")
-            den -= dt.timedelta(days=1)
-        rok, mesic = _o_mesic_zpet(aktualni_prvni.year, aktualni_prvni.month)
-    else:
-        rok, mesic = horni.year, horni.month
-
-    for _ in range(MAX_MESICU_ZPET):
-        if dolni is not None and (rok, mesic) < (dolni.year, dolni.month):
-            break
-        yield (True, True, f"Stahuji data za {rok}-{mesic:02d}",
-               f"{BASE_10MIN}{mesic:02d}/10m-{wsi}-{rok:04d}{mesic:02d}.json")
-        rok, mesic = _o_mesic_zpet(rok, mesic)
+def _dny_mesice_zpet(rok, mesic, horni, dolni):
+    """Data dní měsíce v rozsahu [dolni, min(horni, konec měsíce)], od
+    nejnovějšího po nejstarší."""
+    posledni = calendar.monthrange(rok, mesic)[1]
+    den = min(horni, dt.date(rok, mesic, posledni))
+    zacatek = dt.date(rok, mesic, 1)
+    if dolni is not None and dolni > zacatek:
+        zacatek = dolni
+    while den >= zacatek:
+        yield den
+        den -= dt.timedelta(days=1)
 
 
-def soubory_denni(wsi, horni, dolni, dnes):
-    """Plán souborů denních dat – jeden soubor na měsíc (aktuální měsíc v kořeni,
-    starší měsíce v podsložce MM/), od nejnovějšího po nejstarší. Kešovat lze
-    jen uzavřené (minulé) měsíce; aktuální se ještě plní."""
-    aktualni = (dnes.year, dnes.month)
-    rok, mesic = horni.year, horni.month
-    for _ in range(MAX_MESICU_ZPET):
-        if dolni is not None and (rok, mesic) < (dolni.year, dolni.month):
-            break
-        oznam = f"Stahuji data za {rok}-{mesic:02d}"
-        if (rok, mesic) == aktualni:
-            yield (False, False, oznam,
-                   f"{BASE_DENNI}dly-{wsi}-{rok:04d}{mesic:02d}.json")
-        else:
-            yield (True, True, oznam,
-                   f"{BASE_DENNI}{mesic:02d}/dly-{wsi}-{rok:04d}{mesic:02d}.json")
-        rok, mesic = _o_mesic_zpet(rok, mesic)
+def mesic_zaznamy_10min(wsi, rok, mesic, horni, dolni, dnes, dt_i, val_i,
+                        element, stav):
+    """Líně generuje záznamy 10min dat za jeden měsíc (nejnovější první).
+    Nejdřív zkusí měsíční archiv (jeden soubor), jinak denní soubory v kořeni –
+    kořen drží i právě uzavřený měsíc, než se zkonsoliduje do archivu.
+    Existenci aspoň jednoho souboru zapíše do stav[0]."""
+    minule = (rok, mesic) < (dnes.year, dnes.month)
+    _oznam(f"Stahuji data za {rok}-{mesic:02d}")
+    archiv = stahni(f"{BASE_10MIN}{mesic:02d}/10m-{wsi}-{rok:04d}{mesic:02d}.json",
+                    wsi, kesovat=minule)
+    if archiv is not None:
+        stav[0] = True
+        yield from hodnoty_z_payloadu(archiv, element, dt_i, val_i)
+        return
+
+    for den in _dny_mesice_zpet(rok, mesic, horni, dolni):
+        _oznam(f"Stahuji data za {den:%d.%m.%Y}")
+        p = stahni(f"{BASE_10MIN}10m-{wsi}-{den:%Y%m%d}.json",
+                   wsi, kesovat=(den < dnes))
+        if p is not None:
+            stav[0] = True
+            yield from hodnoty_z_payloadu(p, element, dt_i, val_i)
+
+
+def mesic_zaznamy_denni(wsi, rok, mesic, horni, dolni, dnes, dt_i, val_i,
+                        element, stav):
+    """Líně generuje záznamy denních dat za jeden měsíc. Zkusí soubor v kořeni
+    (aktuální i právě uzavřený měsíc) a pak měsíční archiv."""
+    minule = (rok, mesic) < (dnes.year, dnes.month)
+    _oznam(f"Stahuji data za {rok}-{mesic:02d}")
+    for url in (f"{BASE_DENNI}dly-{wsi}-{rok:04d}{mesic:02d}.json",
+                f"{BASE_DENNI}{mesic:02d}/dly-{wsi}-{rok:04d}{mesic:02d}.json"):
+        payload = stahni(url, wsi, kesovat=minule)
+        if payload is not None:
+            stav[0] = True
+            yield from hodnoty_z_payloadu(payload, element, dt_i, val_i)
+            return
 
 
 def zaznamy_zpet(zdroj, wsi, element, od_dt=None, do_dt=None):
     """Líně generuje záznamy (datetime, hodnota) od nejnovějších po nejstarší
-    z daného zdroje. Soubory stahuje až ve chvíli, kdy jsou potřeba.
+    z daného zdroje, měsíc po měsíci. Soubory stahuje až ve chvíli, kdy jsou
+    potřeba. Zastaví se, jakmile některý *minulý* měsíc nemá žádný soubor (konec
+    archivu); prázdný aktuální měsíc (např. hned po půlnoci 1. dne) přeskočí.
 
-    Volitelné meze od_dt/do_dt (aware datetime) omezí jak rozsah vydaných
-    záznamů, tak rozsah stahovaných souborů – díky tomu se neprochází celý
-    archiv."""
+    Volitelné meze od_dt/do_dt (aware datetime) omezí rozsah vydaných záznamů
+    i rozsah stahovaných souborů."""
     def v_rozsahu(cas):
         return ((od_dt is None or cas >= od_dt)
                 and (do_dt is None or cas <= do_dt))
@@ -439,16 +451,19 @@ def zaznamy_zpet(zdroj, wsi, element, od_dt=None, do_dt=None):
     dolni = None if od_dt is None else od_dt.astimezone(dt.timezone.utc).date()
 
     dt_i, val_i = zdroj["dt_index"], zdroj["val_index"]
-    for archiv, kesovat, oznam, url in zdroj["soubory"](wsi, horni, dolni, dnes):
-        _oznam(oznam)
-        payload = stahni(url, wsi, kesovat)
-        if payload is None:
-            if archiv:
-                break  # archiv končí – starší data nemáme
-            continue   # chybějící aktuální soubor (např. den) přeskočíme
-        for cas, val in hodnoty_z_payloadu(payload, element, dt_i, val_i):
+    aktualni = (dnes.year, dnes.month)
+    rok, mesic = horni.year, horni.month
+    for _ in range(MAX_MESICU_ZPET):
+        if dolni is not None and (rok, mesic) < (dolni.year, dolni.month):
+            break
+        stav = [False]  # nastaví se na True, jakmile měsíc má aspoň jeden soubor
+        for cas, val in zdroj["mesic_zaznamy"](
+                wsi, rok, mesic, horni, dolni, dnes, dt_i, val_i, element, stav):
             if v_rozsahu(cas):
                 yield cas, val
+        if not stav[0] and (rok, mesic) < aktualni:
+            break  # minulý měsíc bez souborů → konec dostupných dat
+        rok, mesic = _o_mesic_zpet(rok, mesic)
 
 
 # Definice zdrojů archivu. `dt_index`/`val_index` udávají sloupce DT a VAL,
@@ -456,11 +471,11 @@ def zaznamy_zpet(zdroj, wsi, element, od_dt=None, do_dt=None):
 ZDROJE = {
     "10min": {
         "krok": KROK_10MIN, "dt_index": 2, "val_index": 3,
-        "soubory": soubory_10min, "denni": False, "jevy": JEVY_10MIN,
+        "mesic_zaznamy": mesic_zaznamy_10min, "denni": False, "jevy": JEVY_10MIN,
     },
     "denni": {
         "krok": KROK_DENNI, "dt_index": 3, "val_index": 4,
-        "soubory": soubory_denni, "denni": True, "jevy": JEVY_DENNI,
+        "mesic_zaznamy": mesic_zaznamy_denni, "denni": True, "jevy": JEVY_DENNI,
     },
 }
 
